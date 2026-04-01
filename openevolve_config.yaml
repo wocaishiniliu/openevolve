@@ -1,0 +1,82 @@
+# OpenEvolve configuration for Router optimization
+# Usage:
+#   export OPENAI_API_KEY="your-gemini-api-key"
+#   python -m openevolve openevolve_program.py openevolve_evaluator.py --config openevolve_config.yaml
+
+max_iterations: 60
+checkpoint_interval: 5
+log_level: INFO
+random_seed: 42
+
+# LLM configuration
+llm:
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  temperature: 0.8
+  max_tokens: 4096
+  timeout: 120
+  retries: 3
+  models:
+    - name: "gemini-2.5-flash"
+      weight: 1.0
+
+# Population: MAP-Elites with 2 islands
+database:
+  population_size: 15
+  num_islands: 2
+  migration_interval: 5
+  migration_rate: 0.15
+  feature_dimensions: ["score", "complexity"]
+  feature_bins: 5
+
+# Evaluator: each eval ~2-3 min (no LLM inference, just BERT training)
+evaluator:
+  timeout: 600  # 10 min max per evaluation
+  enable_artifacts: true
+  cascade_evaluation: false  # no need for cascade, evals are fast
+  max_tasks_per_child: 1  # force spawn to avoid CUDA fork issues
+
+# Evolution strategy
+diff_based_evolution: true
+max_code_length: 8000
+
+# System message to guide LLM mutations
+system_message: |
+  You are optimizing a query router for MPC-private LLM inference.
+  The router decides which LLM (from a pool of different sizes) to use for each query,
+  balancing quality (F1 score) against MPC computation cost.
+
+  Available models and their MPC costs (relative to 7B baseline):
+    1b (Llama-3.2-1B): 0.222x
+    qwen1.5b (Qwen2.5-1.5B): 0.255x
+    3b (Llama-3.2-3B): 0.523x
+    8b (Llama-3.1-8B): 1.107x
+
+  The score = routed_F1 - 10 * weighted_MPC_cost. Maximize this.
+
+  Current best: score=43.25 (F1=50.44, cost=0.719x) using regression + mse with [1b, 3b, 8b].
+  The baseline for all-8B is F1=55.05 at cost=1.107x.
+
+  IMPORTANT: The current approach (label_type="regression" + loss_type="mse") has been well-explored.
+  To find improvements, you MUST try fundamentally different label strategies:
+
+  1. **soft_binary + bce** (HIGH PRIORITY - not yet tried):
+     - Instead of predicting exact F1 scores, predict P(model is sufficient)
+     - Uses sigmoid soft labels: target = sigmoid(temperature * (score - threshold))
+     - Key params to tune: soft_label_threshold (0.3-0.7), soft_label_temperature (2-10)
+     - Loss: bce (BCEWithLogitsLoss)
+     - This is inspired by Hybrid LLM (ICLR 2024) which showed soft labels >> hard labels
+
+  2. **ranking + margin_ranking** (HIGH PRIORITY - not yet tried):
+     - Instead of predicting scores, predict pairwise model preferences
+     - The router only needs to know "3B is better than 1B for this query", not exact scores
+     - Inspired by RouteLLM (ICLR 2025) which uses preference-based routing
+     - Loss: margin_ranking with configurable margin
+
+  3. Also explore:
+     - Different model pools: [1b, 3b, 8b], [qwen1.5b, 3b, 8b], [1b, qwen1.5b, 3b, 8b]
+     - Router architectures: bert-tiny, bert-mini, bert-small, MiniLM-L6-H384-uncased
+     - max_length: 128, 256, 512
+     - quality_threshold: 0.7-0.95
+     - cost_penalty_lambda: 0.0-0.5
+
+  DO NOT just tweak lr/epochs/batch_size on regression+mse. Try different label_type and loss_type combinations first.
