@@ -3,7 +3,7 @@
 #   export OPENAI_API_KEY="your-gemini-api-key"
 #   python -m openevolve openevolve_program.py openevolve_evaluator.py --config openevolve_config.yaml
 
-max_iterations: 60
+max_iterations: 80
 checkpoint_interval: 5
 log_level: INFO
 random_seed: 42
@@ -11,7 +11,7 @@ random_seed: 42
 # LLM configuration
 llm:
   api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
-  temperature: 0.8
+  temperature: 1.0
   max_tokens: 4096
   timeout: 120
   retries: 3
@@ -42,41 +42,38 @@ max_code_length: 8000
 # System message to guide LLM mutations
 system_message: |
   You are optimizing a query router for MPC-private LLM inference.
-  The router decides which LLM (from a pool of different sizes) to use for each query,
-  balancing quality (F1 score) against MPC computation cost.
+  Goal: maximize score = routed_F1 - 10 * weighted_MPC_cost. Higher is better.
+  Current best score: ~45.6 (F1=54.73, cost=0.906x) using ["1b_mpcache","3b_mpcache","8b_mpcache"].
 
-  Available models and their MPC costs (relative to 7B baseline):
-    1b (Llama-3.2-1B): 0.222x
-    qwen1.5b (Qwen2.5-1.5B): 0.255x
-    3b (Llama-3.2-3B): 0.523x
-    8b (Llama-3.1-8B): 1.107x
+  Available models for the pool (pick 2+ for model_keys):
+    1b           cost=0.222x   F1=38.18
+    qwen1.5b     cost=0.255x   F1=44.11   (Qwen family, different strengths)
+    3b           cost=0.523x   F1=49.94
+    8b           cost=1.107x   F1=55.05
+    1b_mpcache   cost=0.152x   F1=37.42   (compressed 1B)
+    3b_mpcache   cost=0.392x   F1=49.21   (compressed 3B)
+    8b_mpcache   cost=0.909x   F1=54.71   (compressed 8B)
 
-  The score = routed_F1 - 10 * weighted_MPC_cost. Maximize this.
+  CRITICAL: Be AGGRESSIVE and CREATIVE. Do NOT just tweak qt or lr. Try RADICALLY different configs:
 
-  Current best: score=43.25 (F1=50.44, cost=0.719x) using regression + mse with [1b, 3b, 8b].
-  The baseline for all-8B is F1=55.05 at cost=1.107x.
+  1. **Wild pool combinations** - try 4-5 model pools:
+     ["1b_mpcache","qwen1.5b","3b_mpcache","8b_mpcache"]
+     ["qwen1.5b","3b","8b_mpcache"]
+     ["1b","qwen1.5b","3b_mpcache","8b"]
+     ["1b_mpcache","3b","8b"]
+     Mix compressed and uncompressed models freely!
 
-  IMPORTANT: The current approach (label_type="regression" + loss_type="mse") has been well-explored.
-  To find improvements, you MUST try fundamentally different label strategies:
+  2. **Different label strategies** - MUST try at least one of:
+     - label_type="soft_binary" + loss_type="bce" + soft_label_threshold=0.3-0.7 + soft_label_temperature=2-10
+     - label_type="ranking" + loss_type="margin_ranking"
+     - loss_type="weighted_mse" with cost_penalty_lambda=0.1-0.5
 
-  1. **soft_binary + bce** (HIGH PRIORITY - not yet tried):
-     - Instead of predicting exact F1 scores, predict P(model is sufficient)
-     - Uses sigmoid soft labels: target = sigmoid(temperature * (score - threshold))
-     - Key params to tune: soft_label_threshold (0.3-0.7), soft_label_temperature (2-10)
-     - Loss: bce (BCEWithLogitsLoss)
-     - This is inspired by Hybrid LLM (ICLR 2024) which showed soft labels >> hard labels
+  3. **Different router architectures**:
+     "prajjwal1/bert-mini" (4 layers, 256 hidden, more capacity)
+     "prajjwal1/bert-small" (4 layers, 512 hidden)
 
-  2. **ranking + margin_ranking** (HIGH PRIORITY - not yet tried):
-     - Instead of predicting scores, predict pairwise model preferences
-     - The router only needs to know "3B is better than 1B for this query", not exact scores
-     - Inspired by RouteLLM (ICLR 2025) which uses preference-based routing
-     - Loss: margin_ranking with configurable margin
+  4. **Extreme quality_threshold values**: try 0.5, 0.6, 0.7 for aggressive cost saving
 
-  3. Also explore:
-     - Different model pools: [1b, 3b, 8b], [qwen1.5b, 3b, 8b], [1b, qwen1.5b, 3b, 8b]
-     - Router architectures: bert-tiny, bert-mini, bert-small, MiniLM-L6-H384-uncased
-     - max_length: 128, 256, 512
-     - quality_threshold: 0.7-0.95
-     - cost_penalty_lambda: 0.0-0.5
+  5. **Training**: try lr=5e-5 or 1e-4 for faster convergence, epochs=30 for more training
 
-  DO NOT just tweak lr/epochs/batch_size on regression+mse. Try different label_type and loss_type combinations first.
+  Do NOT repeat configs that are similar to previous attempts. Each mutation should change at least 2 parameters significantly.

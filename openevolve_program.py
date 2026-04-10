@@ -1,67 +1,60 @@
 """
 Router Configuration — evolved by OpenEvolve.
 
-OpenEvolve will mutate get_router_config() to explore different router strategies.
-The evaluator trains a router using these settings and measures routed F1 vs MPC cost.
+Goal: maximize routed F1 while minimizing MPC cost. Score = F1 - 10 × cost.
 
-Fixed resources (not evolved):
-- Pre-computed predictions for all models: MPCache/router/data/{1b,qwen1.5b,3b,8b}/*.jsonl
-- MPC costs: 1b=0.222, qwen1.5b=0.255, 3b=0.523, 8b=1.107 (relative to longchat-7B)
+Available models (with MPCache compressed variants):
+  1b           cost=0.222x   F1≈38.18
+  qwen1.5b     cost=0.255x   F1≈44.11
+  3b           cost=0.523x   F1≈49.94
+  8b           cost=1.107x   F1≈55.05
+  1b_mpcache   cost=0.152x   F1≈37.42  (1B with MPCache, -0.76 F1, -31% cost)
+  3b_mpcache   cost=0.392x   F1≈49.21  (3B with MPCache, -0.73 F1, -25% cost)
+  8b_mpcache   cost=0.909x   F1≈54.71  (8B with MPCache, -0.33 F1, -18% cost)
+
+Strong baseline to beat: 8B+MPCache F1=54.71, cost=0.909x.
 
 Constraints:
-- model_keys: subset of ["1b", "qwen1.5b", "3b", "8b"], must include at least 2
-- router_model: one of ["prajjwal1/bert-tiny", "prajjwal1/bert-mini", "prajjwal1/bert-small", "nreimers/MiniLM-L6-H384-uncased"]
-- max_length: one of [128, 256, 512]
-- label_type: one of ["regression", "soft_binary", "ranking"]
-- loss_type: must be compatible with label_type (see below)
-- quality_threshold: float in [0.5, 1.0], controls cost-quality tradeoff at routing time
-- lr: float in [1e-6, 1e-3]
-- epochs: int in [5, 40]
-- batch_size: one of [8, 16, 32]
-- cost_penalty_lambda: float in [0.0, 1.0], penalty for routing to expensive models
-
-Label-Loss compatibility:
-- regression + mse: predict raw F1 scores per model
-- regression + weighted_mse: weight MSE by inverse model cost (penalize cheap-model errors more)
-- soft_binary + bce: predict P(model is sufficient), soft sigmoid labels
-- ranking + margin_ranking: predict pairwise preferences between models
-
-Routing strategy at inference time:
-- "cheapest_sufficient": among models with predicted score >= threshold * best, pick cheapest
-- "cost_constrained": among models with cost <= budget, pick highest predicted score
+- model_keys: subset of available models, must include at least 2
+- router_model: one of ["prajjwal1/bert-tiny", "prajjwal1/bert-mini",
+                       "prajjwal1/bert-small", "nreimers/MiniLM-L6-H384-uncased"]
+- max_length: 128, 256, or 512
+- label_type: "regression" (recommended), "soft_binary", "ranking"
+- loss_type: "mse", "weighted_mse", "bce" (with soft_binary)
+- quality_threshold: float in [0.5, 1.0]
+- lr in [1e-6, 1e-3], epochs in [10, 40], batch_size in [8, 16, 32]
 """
 
 
 # EVOLVE-BLOCK-START
 def get_router_config():
-    """Return the full router configuration. OpenEvolve will evolve this function."""
+    """Return router configuration. OpenEvolve mutates this function."""
     config = {
-        # Model pool: which models to route between
-        "model_keys": ["1b", "3b", "8b"],
+        # Model pool: try MPCache compressed variants for lower cost
+        "model_keys": ["1b_mpcache", "3b_mpcache", "8b_mpcache"],
 
         # Router architecture
         "router_model": "prajjwal1/bert-tiny",
-        "max_length": 128,
+        "max_length": 256,
 
-        # Label strategy
+        # Label & loss
         "label_type": "regression",
-
-        # Soft binary params (only used if label_type == "soft_binary")
-        "soft_label_threshold": 0.5,   # F1 threshold for "sufficient"
-        "soft_label_temperature": 5.0, # sigmoid sharpness
-
-        # Loss function
+        "soft_label_threshold": 0.5,
+        "soft_label_temperature": 5.0,
         "loss_type": "mse",
         "cost_penalty_lambda": 0.0,
 
-        # Training hyperparameters
+        # Training
         "lr": 2e-5,
         "epochs": 20,
         "batch_size": 16,
 
-        # Routing decision at inference time
+        # Routing
         "routing_strategy": "cheapest_sufficient",
-        "quality_threshold": 0.9,
+        "quality_threshold": 1.0,
+
+        # Cost budget (None = unlimited, 0.909 = beat 8B+MPCache, etc.)
+        "cost_budget": None,
     }
     return config
 # EVOLVE-BLOCK-END

@@ -36,11 +36,25 @@ MPC_COSTS = {
     "qwen1.5b": 0.255,
     "3b": 0.523,
     "8b": 1.107,
+    # MPCache compressed variants
+    "1b_mpcache": 0.152,
+    "3b_mpcache": 0.392,
+    "8b_mpcache": 0.909,
+}
+
+# Map model_key to data directory (for predictions)
+MODEL_DIR_MAP = {
+    "1b": "1b", "qwen1.5b": "qwen1.5b", "3b": "3b", "8b": "8b",
+    "1b_mpcache": "1b_mpcache",
+    "3b_mpcache": "3b_mpcache",
+    "8b_mpcache": "8b_mpcache",
 }
 
 # Baselines for reference (all-8B scores)
 ALL_8B_F1 = 55.05
 ALL_8B_COST = 1.107
+BB_MPCACHE_F1 = 54.71
+BB_MPCACHE_COST = 0.909
 
 
 # === Data Loading ===
@@ -434,36 +448,50 @@ def evaluate(program_path):
         os.unlink(config_path)
         os.unlink(result_path)
 
-        # Composite score: F1 with cost penalty
-        # Higher is better. Penalize high cost, reward high F1.
-        cost_penalty = results["weighted_cost"] * 10  # scale cost to be comparable to F1
-        score = results["routed_f1"] - cost_penalty
+        # Score depends on cost_budget mode
+        cost_budget = config.get("cost_budget", None)
+        routed_f1 = results["routed_f1"]
+        weighted_cost = results["weighted_cost"]
 
-        print(f"[eval] Routed F1: {results['routed_f1']}, Cost: {results['weighted_cost']}, Score: {score:.2f}")
+        if cost_budget is not None:
+            # Hard constraint: penalize heavily if over budget
+            if weighted_cost > cost_budget:
+                score = routed_f1 - 100 * (weighted_cost - cost_budget)
+            else:
+                score = routed_f1  # within budget, pure F1 maximization
+        else:
+            # No budget: pure F1 maximization
+            score = routed_f1
+
+        print(f"[eval] Routed F1: {routed_f1}, Cost: {weighted_cost}, Budget: {cost_budget}, Score: {score:.2f}")
         print(f"[eval] Per-dataset: {json.dumps(results['per_dataset'], indent=2)}")
 
         # Build artifacts for LLM feedback
+        budget_str = f"{cost_budget}x" if cost_budget else "unlimited"
+        over_budget = f" ⚠️ OVER BUDGET by {weighted_cost - cost_budget:.3f}x" if cost_budget and weighted_cost > cost_budget else ""
         artifacts = {
             "stderr": "",
             "results_summary": (
-                f"Routed F1: {results['routed_f1']} (oracle: {results['oracle_f1']})\n"
-                f"MPC Cost: {results['weighted_cost']:.3f}x (all-8B baseline: {ALL_8B_COST}x)\n"
+                f"Routed F1: {routed_f1} (oracle: {results['oracle_f1']})\n"
+                f"MPC Cost: {weighted_cost:.3f}x (budget: {budget_str}){over_budget}\n"
                 f"Route distribution: {results['route_distribution']}\n"
                 f"MAE: {results['mae']}\n"
                 f"Val loss: {results['mean_val_loss']}\n"
                 f"Per-dataset F1: {json.dumps({ds: r['routed_f1'] for ds, r in results['per_dataset'].items()})}\n"
-                f"\nCompare to baselines:\n"
+                f"\nBaselines:\n"
+                f"  All-3B: F1=49.94, cost=0.523x\n"
+                f"  MPCache 7B: F1=37.97, cost=0.802x\n"
                 f"  All-8B: F1={ALL_8B_F1}, cost={ALL_8B_COST}x\n"
-                f"  This config: F1={results['routed_f1']}, cost={results['weighted_cost']:.3f}x\n"
-                f"  F1 retained: {results['routed_f1']/ALL_8B_F1*100:.1f}% at {results['weighted_cost']/ALL_8B_COST*100:.1f}% cost"
+                f"  This config: F1={routed_f1}, cost={weighted_cost:.3f}x\n"
+                f"  F1 retained: {routed_f1/ALL_8B_F1*100:.1f}% at {weighted_cost/ALL_8B_COST*100:.1f}% cost"
             ),
         }
 
         return {
             "score": round(score, 2),
             "metrics": {
-                "performance": results["routed_f1"],
-                "cost": results["weighted_cost"],
+                "performance": routed_f1,
+                "cost": weighted_cost,
             },
             "artifacts": artifacts,
         }
